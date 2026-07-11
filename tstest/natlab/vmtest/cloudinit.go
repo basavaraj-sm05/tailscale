@@ -18,6 +18,7 @@ import (
 	"github.com/creachadair/mds/shell"
 	"github.com/kdomanski/iso9660"
 	"golang.org/x/crypto/ssh"
+	"tailscale.com/tstest/natlab/vnet"
 )
 
 // createCloudInitISO creates a cidata seed ISO for the given cloud VM node.
@@ -129,11 +130,22 @@ func (e *Env) generateLinuxUserData(n *Node) string {
 	}
 	ud.WriteString("  - [\"chmod\", \"+x\", \"/usr/local/bin/tailscaled\", \"/usr/local/bin/tailscale\", \"/usr/local/bin/tta\"]\n")
 
+	// Apply the bin_t label for SELinux enforcement: we curl the binaries in
+	// rather than installing a package, so nothing else labels them, and
+	// enforcing mode would deny exec. No-op on non-SELinux systems, but only
+	// RHEL-family images ship restorecon.
+	if n.os.Family == LinuxRHEL {
+		ud.WriteString("  - [\"/bin/sh\", \"-c\", \"restorecon -v /usr/local/bin/tailscaled /usr/local/bin/tailscale /usr/local/bin/tta 2>&1 || true\"]\n")
+	}
+
 	// Enable IP forwarding for subnet routers.
 	if n.advertiseRoutes != "" {
 		ud.WriteString("  - [\"sysctl\", \"-w\", \"net.ipv4.ip_forward=1\"]\n")
 		ud.WriteString("  - [\"sysctl\", \"-w\", \"net.ipv6.conf.all.forwarding=1\"]\n")
 	}
+
+	// Provision the requested DNS backend before tailscaled starts.
+	writeLinuxDNSModeSetup(&ud, n.dnsMode)
 
 	// Start tailscaled, either via the stock systemd unit or directly in
 	// the background. --statedir provides a VarRoot so features like
@@ -155,6 +167,25 @@ func (e *Env) generateLinuxUserData(n *Node) string {
 	ud.WriteString("  - [\"/bin/sh\", \"-c\", \"/usr/local/bin/tta &\"]\n")
 
 	return ud.String()
+}
+
+// writeLinuxDNSModeSetup appends cloud-init runcmd entries that provision the
+// guest so tailscaled selects the requested DNS backend. Must run before the
+// tailscaled launch entries. mode is validated in AddNode.
+func writeLinuxDNSModeSetup(ud *strings.Builder, mode DNSMode) {
+	switch mode {
+	case DNSDefault:
+		// Leave the image's DNS config alone: systemd-resolved stays enabled,
+		// so tailscaled selects it (or whatever the image runs by default).
+	case DNSDirect:
+		// Mask systemd-resolved and drop a plain resolv.conf so dnsMode() in
+		// net/dns/manager_linux.go falls through to "direct". Point it at
+		// natlab's fake DNS VIP (not a public resolver): it's the only resolver
+		// reachable in vnet and it serves the internal *.tailscale names.
+		fmt.Fprintf(ud, "  - [\"/bin/sh\", \"-c\", \"systemctl disable --now systemd-resolved 2>/dev/null || true\"]\n")
+		fmt.Fprintf(ud, "  - [\"/bin/sh\", \"-c\", \"systemctl mask systemd-resolved 2>/dev/null || true\"]\n")
+		fmt.Fprintf(ud, "  - [\"/bin/sh\", \"-c\", \"rm -f /etc/resolv.conf && printf 'nameserver %s\\\\n' >/etc/resolv.conf\"]\n", vnet.FakeDNSIPv4())
+	}
 }
 
 // generateFreeBSDUserData creates FreeBSD nuageinit user-data (#cloud-config)
