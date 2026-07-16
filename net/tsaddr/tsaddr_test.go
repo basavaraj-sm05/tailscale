@@ -284,6 +284,16 @@ func TestIsTailscaleIP(t *testing.T) {
 			in:   netip.MustParseAddr("100.115.92.157"),
 			want: false,
 		},
+		{
+			// IPv4-mapped IPv6 form of a CGNAT address is still a Tailscale IP.
+			in:   netip.MustParseAddr("::ffff:100.67.19.57"),
+			want: true,
+		},
+		{
+			// IPv4-mapped IPv6 form of a non-Tailscale address.
+			in:   netip.MustParseAddr("::ffff:10.10.10.10"),
+			want: false,
+		},
 	}
 	for _, tt := range tests {
 		if got := IsTailscaleIP(tt.in); got != tt.want {
